@@ -1,18 +1,20 @@
 import os
 import io
 import json
+import time
 import tempfile
 from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-# Streamlit for Web UI
+# Streamlit für die Web UI
 import streamlit as st
 
-# Google GenAI SDK (Official Gemini SDK)
+# Google GenAI SDK (Offizielles Gemini SDK)
 from google import genai
 from google.genai import types
 
+# Google Drive API
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -69,18 +71,37 @@ Berücksichtige strikt:
 4. Sei extrem praxisnah, präzise und übersehe keine sicherheitskritischen Details.
 """
 
+def extract_drive_id(folder_input: str) -> str:
+    """Extrahiert die Drive-Ordner-ID, falls der Benutzer versehentlich den ganzen Link einfügt."""
+    if "drive.google.com" in folder_input:
+        # Schneidet alles vor dem letzten '/' ab und entfernt eventuelle '?' Parameter
+        return folder_input.split("/")[-1].split("?")[0]
+    return folder_input.strip()
+
 def analyze_lv_with_agent(uploaded_file, api_key: str) -> BaustellenVorbereitungsPlan:
-    """Lädt die PDF direkt zu Google Gemini hoch – ideal für riesige Dateien & Scans."""
+    """Lädt die PDF zu Google Gemini hoch und wartet auf Verarbeitung."""
     client = genai.Client(api_key=api_key)
     
+    # Temporäre Datei anlegen, um sie an die Google-Server zu senden
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_path = tmp_file.name
 
     try:
+        # Datei hochladen
         gemini_file = client.files.upload(file=tmp_path)
+        
+        # WARTESCHLEIFE (Sicherheits-Check für sehr große Dateien)
+        while gemini_file.state.name == "PROCESSING":
+            time.sleep(2)
+            gemini_file = client.files.get(name=gemini_file.name)
+            
+        if gemini_file.state.name == "FAILED":
+            raise Exception("Google Server konnten diese Datei nicht verarbeiten.")
+
         prompt = "Analysiere das beigefügte Leistungsverzeichnis (LV) vollständig und erstelle den Baustellenvorbereitungsplan inklusive Projektnummer und Auftraggeber."
 
+        # KI-Generierung aufrufen
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[gemini_file, prompt],
@@ -96,18 +117,21 @@ def analyze_lv_with_agent(uploaded_file, api_key: str) -> BaustellenVorbereitung
         return parsed_result
 
     finally:
+        # Räumt die temporäre Datei vom Server auf
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-def create_drive_folders(credentials_json_str: str, parent_folder_id: str, projektnummer: str, auftraggeber: str, projekt_titel: str):
-    """Erstellt die gewünschte Ordnerstruktur in Google Drive via Google Drive API."""
+def create_drive_folders(credentials_json_str: str, raw_folder_id: str, projektnummer: str, auftraggeber: str, projekt_titel: str):
+    """Erstellt die gewünschte Ordnerstruktur in Google Drive."""
     try:
+        # Ordner ID bereinigen (falls Link eingefügt wurde)
+        parent_folder_id = extract_drive_id(raw_folder_id)
+        
         creds_dict = json.loads(credentials_json_str)
         creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
         service = build('drive', 'v3', credentials=creds)
 
         # 1. Hauptordner erstellen (PROJEKTNUMMER_AUFTRAGGEBER_PROJEKT)
-        # Bereinige mögliche ungültige Zeichen
         folder_name = f"{projektnummer}_{auftraggeber}_{projekt_titel}".replace("/", "-").replace("\\", "-")
         file_metadata = {
             'name': folder_name,
@@ -121,8 +145,8 @@ def create_drive_folders(credentials_json_str: str, parent_folder_id: str, proje
         # 2. Unterordner erstellen
         subfolders = [
             f"01_Organisation {projektnummer}",
-            f"02_WS / LS {projektnummer}",
-            f"03_BTB / Aufmaß {projektnummer}"
+            f"02_WS - LS {projektnummer}", # Schrägstrich durch Bindestrich ersetzt (Besser für Dateisysteme)
+            f"03_BTB - Aufmaß {projektnummer}"
         ]
         
         for sub_name in subfolders:
@@ -147,6 +171,7 @@ def main():
     st.title("🏗️ Armin 2.0: Baustellenvorbereitung & Materialplanung")
     st.markdown("**Spezialisiert auf Hochbau, Abbruch & Schadstoffsanierung** | Ausgelegt für 7-Mann-Teams")
 
+    # Seitenleiste
     with st.sidebar:
         st.header("⚙️ KI-Konfiguration")
         api_key = st.text_input(
@@ -159,13 +184,13 @@ def main():
         st.divider()
         st.header("☁️ Google Drive Automatisierung")
         drive_folder_id = st.text_input(
-            "Ordner-ID von 'Baustellen'",
-            help="Öffne den Baustellen-Ordner in Drive. Die ID steht oben im Link: https://drive.google.com/drive/folders/HIER_STEHT_DIE_ID"
+            "Ordner-ID oder Link von 'Baustellen'",
+            help="Du kannst hier einfach den kompletten Link deines Ordners reinkopieren. Armin filtert die ID selbst heraus."
         )
         drive_creds = st.text_area(
             "Drive Service Account JSON",
             type="password",
-            help="Füge hier den Inhalt deiner Google Cloud credentials.json Datei ein."
+            help="Füge hier den kompletten Text deiner Google Cloud credentials.json Datei ein."
         )
 
         st.info("💡 **Sparten-Schwerpunkte:**\n- Asbest (TRGS 519)\n- KMF (TRGS 521)\n- Abbruch & Hochbau\n- Ordner-Auto-Create")
@@ -175,7 +200,13 @@ def main():
         type=["pdf"]
     )
 
+    # Wenn der Nutzer ein NEUES File hochlädt, den alten Plan löschen
     if uploaded_file is not None:
+        if "last_uploaded_file" not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
+            st.session_state.last_uploaded_file = uploaded_file.name
+            if "plan" in st.session_state:
+                del st.session_state.plan
+
         file_size_mb = uploaded_file.size / (1024 * 1024)
         st.success(f"Datei `{uploaded_file.name}` ({file_size_mb:.1f} MB) erfolgreich geladen.")
         
@@ -183,21 +214,19 @@ def main():
         with col1:
             start_btn = st.button("🚀 Baustelle vorbereiten", type="primary")
 
-        # 1. Analyse starten und im Zwischenspeicher speichern
+        # 1. Analyse starten
         if start_btn:
             if not api_key:
                 st.error("Bitte gib zuerst einen gültigen Gemini API-Key in der Seitenleiste ein.")
             else:
-                with st.spinner("Armin analysiert das Dokument... Das kann bei großen Scans 30-60 Sekunden dauern."):
+                with st.spinner("Armin analysiert das Dokument... Das kann bei großen Scans bis zu 60 Sekunden dauern."):
                     try:
-                        # Speichere das Ergebnis direkt in den session_state
                         st.session_state.plan = analyze_lv_with_agent(uploaded_file, api_key)
                         st.toast("Analyse erfolgreich abgeschlossen!", icon="✅")
                     except Exception as e:
                         st.error(f"Fehler bei der Analyse: {str(e)}")
 
-        # 2. Prüfen, ob ein Plan im Zwischenspeicher vorliegt. 
-        # Falls ja, zeigen wir ihn an und erlauben den Klick auf den Drive-Button.
+        # 2. Prüfen, ob ein Plan im Zwischenspeicher vorliegt.
         if "plan" in st.session_state:
             plan = st.session_state.plan
             
@@ -207,12 +236,11 @@ def main():
 
             col_drive1, col_drive2 = st.columns([1, 3])
             with col_drive1:
-                # Dieser Button funktioniert jetzt, weil die if-Bedingung oben ("plan" in st.session_state) immer noch erfüllt ist!
                 drive_btn = st.button("📂 Ablage in Google Drive anlegen", type="primary", use_container_width=True)
             
             if drive_btn:
                 if not drive_folder_id or not drive_creds:
-                    st.error("⚠️ Bitte trage links in der Seitenleiste zuerst die Ordner-ID und das Drive JSON ein.")
+                    st.error("⚠️ Bitte trage links in der Seitenleiste zuerst den Ordner-Link und das Drive JSON ein.")
                 else:
                     with st.spinner("Ordnerstruktur wird angelegt..."):
                         link = create_drive_folders(

@@ -183,96 +183,101 @@ def main():
         with col1:
             start_btn = st.button("🚀 Baustelle vorbereiten", type="primary")
 
+        # 1. Analyse starten und im Zwischenspeicher speichern
         if start_btn:
             if not api_key:
                 st.error("Bitte gib zuerst einen gültigen Gemini API-Key in der Seitenleiste ein.")
-                return
+            else:
+                with st.spinner("Armin analysiert das Dokument... Das kann bei großen Scans 30-60 Sekunden dauern."):
+                    try:
+                        # Speichere das Ergebnis direkt in den session_state
+                        st.session_state.plan = analyze_lv_with_agent(uploaded_file, api_key)
+                        st.toast("Analyse erfolgreich abgeschlossen!", icon="✅")
+                    except Exception as e:
+                        st.error(f"Fehler bei der Analyse: {str(e)}")
 
-            with st.spinner("Armin analysiert das Dokument... Das kann bei großen Scans 30-60 Sekunden dauern."):
-                try:
-                    plan: BaustellenVorbereitungsPlan = analyze_lv_with_agent(uploaded_file, api_key)
-                    
-                    st.toast("Analyse erfolgreich abgeschlossen!", icon="✅")
-                    
-                    st.divider()
-                    st.header(f"📋 Projekt: {plan.projektnummer} - {plan.auftraggeber} - {plan.projekt_titel}")
-                    st.caption(f"Kategorie: {plan.sparte}")
+        # 2. Prüfen, ob ein Plan im Zwischenspeicher vorliegt. 
+        # Falls ja, zeigen wir ihn an und erlauben den Klick auf den Drive-Button.
+        if "plan" in st.session_state:
+            plan = st.session_state.plan
+            
+            st.divider()
+            st.header(f"📋 Projekt: {plan.projektnummer} - {plan.auftraggeber} - {plan.projekt_titel}")
+            st.caption(f"Kategorie: {plan.sparte}")
 
-                    col_drive1, col_drive2 = st.columns([1, 3])
-                    with col_drive1:
-                        drive_btn = st.button("📂 Ablage in Google Drive anlegen", type="primary", use_container_width=True)
-                    
-                    if drive_btn:
-                        if not drive_folder_id or not drive_creds:
-                            st.error("⚠️ Bitte trage links in der Seitenleiste zuerst die Ordner-ID und das Drive JSON ein.")
+            col_drive1, col_drive2 = st.columns([1, 3])
+            with col_drive1:
+                # Dieser Button funktioniert jetzt, weil die if-Bedingung oben ("plan" in st.session_state) immer noch erfüllt ist!
+                drive_btn = st.button("📂 Ablage in Google Drive anlegen", type="primary", use_container_width=True)
+            
+            if drive_btn:
+                if not drive_folder_id or not drive_creds:
+                    st.error("⚠️ Bitte trage links in der Seitenleiste zuerst die Ordner-ID und das Drive JSON ein.")
+                else:
+                    with st.spinner("Ordnerstruktur wird angelegt..."):
+                        link = create_drive_folders(
+                            drive_creds, 
+                            drive_folder_id, 
+                            plan.projektnummer, 
+                            plan.auftraggeber, 
+                            plan.projekt_titel
+                        )
+                        if link.startswith("http"):
+                            st.success(f"✅ Ordnerstruktur fertig! [Hier klicken, um Ablage zu öffnen]({link})")
                         else:
-                            with st.spinner("Ordnerstruktur wird angelegt..."):
-                                link = create_drive_folders(
-                                    drive_creds, 
-                                    drive_folder_id, 
-                                    plan.projektnummer, 
-                                    plan.auftraggeber, 
-                                    plan.projekt_titel
-                                )
-                                if link.startswith("http"):
-                                    st.success(f"✅ Ordnerstruktur fertig! [Hier klicken, um Ablage zu öffnen]({link})")
-                                else:
-                                    st.error(link)
-                    
-                    st.markdown(f"**Projektüberblick:** {plan.zusammenfassung}")
+                            st.error(link)
+            
+            st.markdown(f"**Projektüberblick:** {plan.zusammenfassung}")
 
-                    tabs = st.tabs([
-                        "📦 Material- & Bestellliste", 
-                        "⚠️ Schadstoff & Arbeitsschutz", 
-                        "🏛️ Behörden & Fristen", 
-                        "🚜 Baustellenlogistik & 7-Mann Team", 
-                        "📅 T-Minus Checkliste"
-                    ])
+            tabs = st.tabs([
+                "📦 Material- & Bestellliste", 
+                "⚠️ Schadstoff & Arbeitsschutz", 
+                "🏛️ Behörden & Fristen", 
+                "🚜 Baustellenlogistik & 7-Mann Team", 
+                "📅 T-Minus Checkliste"
+            ])
 
-                    with tabs[0]:
-                        st.subheader("Einkaufs- und Dispositionsliste")
-                        material_data = [{"Material / Gerät": m.name, "Menge": m.menge, "Vorlauf": m.liefertermin_vorlauf, "Hinweise": m.anmerkung or "-"} for m in plan.material_bestellliste]
-                        st.dataframe(material_data, use_container_width=True)
+            with tabs[0]:
+                st.subheader("Einkaufs- und Dispositionsliste")
+                material_data = [{"Material / Gerät": m.name, "Menge": m.menge, "Vorlauf": m.liefertermin_vorlauf, "Hinweise": m.anmerkung or "-"} for m in plan.material_bestellliste]
+                st.dataframe(material_data, use_container_width=True)
 
-                    with tabs[1]:
-                        st.subheader("Gefahrstoffmanagement & Arbeitssicherheit")
-                        if plan.schadstoff_arbeitsschutz.schadstoff_art:
-                            st.warning(f"**Identifizierte Schadstoffe:** {plan.schadstoff_arbeitsschutz.schadstoff_art}")
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            st.markdown("#### 🦺 Erforderliche PSA")
-                            for psa in plan.schadstoff_arbeitsschutz.psa_anforderungen: st.markdown(f"- {psa}")
-                            st.markdown("#### 🔬 Technische Maßnahmen")
-                            for tech in plan.schadstoff_arbeitsschutz.technische_massnahmen: st.markdown(f"- {tech}")
-                        with col_b:
-                            st.markdown("#### ♻️ Entsorgung (AVV)")
-                            for avv in plan.schadstoff_arbeitsschutz.entsorgung_abfallschluessel: st.markdown(f"- `{avv}`")
+            with tabs[1]:
+                st.subheader("Gefahrstoffmanagement & Arbeitssicherheit")
+                if plan.schadstoff_arbeitsschutz.schadstoff_art:
+                    st.warning(f"**Identifizierte Schadstoffe:** {plan.schadstoff_arbeitsschutz.schadstoff_art}")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown("#### 🦺 Erforderliche PSA")
+                    for psa in plan.schadstoff_arbeitsschutz.psa_anforderungen: st.markdown(f"- {psa}")
+                    st.markdown("#### 🔬 Technische Maßnahmen")
+                    for tech in plan.schadstoff_arbeitsschutz.technische_massnahmen: st.markdown(f"- {tech}")
+                with col_b:
+                    st.markdown("#### ♻️ Entsorgung (AVV)")
+                    for avv in plan.schadstoff_arbeitsschutz.entsorgung_abfallschluessel: st.markdown(f"- `{avv}`")
 
-                    with tabs[2]:
-                        st.subheader("Genehmigungen, Anzeigen & Vorlauffristen")
-                        for beh in plan.behoerdliche_schritte:
-                            with st.expander(f"📌 {beh.anzeige_antrag} ({beh.behoerde_oder_stelle})"):
-                                st.markdown(f"**Frist / Vorlauf:** `{beh.frist_vorlauf}`")
-                                for doc in beh.erforderliche_unterlagen: st.markdown(f"- {doc}")
+            with tabs[2]:
+                st.subheader("Genehmigungen, Anzeigen & Vorlauffristen")
+                for beh in plan.behoerdliche_schritte:
+                    with st.expander(f"📌 {beh.anzeige_antrag} ({beh.behoerde_oder_stelle})"):
+                        st.markdown(f"**Frist / Vorlauf:** `{beh.frist_vorlauf}`")
+                        for doc in beh.erforderliche_unterlagen: st.markdown(f"- {doc}")
 
-                    with tabs[3]:
-                        st.subheader("Baustelleninfrastruktur & Personaleinteilung")
-                        st.info(f"👷 **Einsatzplan für 7-Mann-Truppe:**\n\n{plan.baustellen_logistik.personal_einsatz}")
-                        col_m1, col_m2 = st.columns(2)
-                        with col_m1:
-                            st.markdown("#### 🚜 Großgeräte & Maschinen")
-                            for dev in plan.baustellen_logistik.geraete_und_maschinen: st.markdown(f"- {dev}")
-                        with col_m2:
-                            st.markdown("#### 🚧 Baustelleneinrichtung (BE)")
-                            for be in plan.baustellen_logistik.baustelleneinrichtung: st.markdown(f"- {be}")
+            with tabs[3]:
+                st.subheader("Baustelleninfrastruktur & Personaleinteilung")
+                st.info(f"👷 **Einsatzplan für 7-Mann-Truppe:**\n\n{plan.baustellen_logistik.personal_einsatz}")
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    st.markdown("#### 🚜 Großgeräte & Maschinen")
+                    for dev in plan.baustellen_logistik.geraete_und_maschinen: st.markdown(f"- {dev}")
+                with col_m2:
+                    st.markdown("#### 🚧 Baustelleneinrichtung (BE)")
+                    for be in plan.baustellen_logistik.baustelleneinrichtung: st.markdown(f"- {be}")
 
-                    with tabs[4]:
-                        st.subheader("Chronologische To-Do Liste")
-                        for idx, item in enumerate(plan.checkliste_vorlauf, 1):
-                            st.checkbox(f"{item}", key=f"check_{idx}")
-
-                except Exception as e:
-                    st.error(f"Fehler bei der Analyse: {str(e)}")
+            with tabs[4]:
+                st.subheader("Chronologische To-Do Liste")
+                for idx, item in enumerate(plan.checkliste_vorlauf, 1):
+                    st.checkbox(f"{item}", key=f"check_{idx}")
 
 if __name__ == "__main__":
     main()
